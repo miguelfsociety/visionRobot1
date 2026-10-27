@@ -1,241 +1,132 @@
-# Robot Vision - Cerebro de visión para robot seguidor de línea
+# Robot seguidor de línea con cinco CNN de señales
 
-Este proyecto define una base modular para un sistema de visión artificial clásico en Python para un robot móvil autónomo.
+Extensión de [visionRobot1, rama feature/control-movimiento](https://github.com/stfrancoc/visionRobot1/tree/feature/control-movimiento), basada en el commit `77a695982a9b997e79e8e5823f89c7a39527fac1`. Integra el entrenador del proyecto `5_cnns` con el seguimiento de línea, la máquina de estados y la comunicación Bluetooth del robot original.
 
-## Objetivo inicial
+## Señales y comportamiento
 
-- Capturar video desde un celular conectado por Wi‑Fi.
-- Probar una etapa de segmentación con K‑Means por cuadro.
-- Dejar una arquitectura lista para integrar:
-  - seguimiento de línea,
-  - detección de señales PARE/SIGA,
-  - control del robot.
-
-## Estructura
-
-- `src/camera/`: captura y gestión del flujo de video.
-- `src/processing/`: módulos de segmentación, detección y análisis.
-- `src/utils/`: utilidades auxiliares.
-- `src/config.py`: configuración centralizada desde `.env`.
-
-## Instalación
-
-```bash
-python -m venv .venv
-. .venv/Scripts/activate
-pip install -r requirements.txt
-```
-
-## Ejecución
-
-```bash
-python src/main.py
-```
-
-## Configuración de la cámara
-
-Ajusta la URL de la cámara en `.env`.
-
-Ejemplos compatibles:
-
-- IP Webcam: `http://192.168.1.10:8080/video`
-- MJPEG stream: `http://192.168.1.10:8080/videofeed` o similar
-
-## Nota de arquitectura
-
-El módulo de K‑Means es un prototipo de prueba de concepto. Más adelante será reemplazado o combinado con HSV + morfología para detectar la línea y las señales.
-
-# Reto 1 · Cerebro de un robot seguidor de línea
-
-**Visión Artificial – Universidad de Caldas**
-Módulo de la laptop: recibe el video de la cámara del teléfono, detecta la línea y las señales PARE/SIGA, decide el movimiento y entrega los comandos al módulo de comunicación (a cargo de otro integrante del equipo).
-
-> Restricción del reto: **sin redes neuronales, sin deep learning, sin modelos entrenados, sin cascadas Haar, sin servicios de IA externos.** Solo técnicas vistas en la materia (ver sección *Técnicas permitidas*).
-
----
-
-## 1. Arquitectura del sistema
-
-```
-Teléfono (cámara)  --WiFi/IP-->  Laptop (este proyecto)  --Bluetooth-->  Arduino (motores)
-                                   │
-                                   ├─ Captura (hilo, último fotograma)
-                                   ├─ Preprocesamiento (resize, rotación, blur, recorte del chasis)
-                                   ├─ Rama LÍNEA   → error de posición + ángulo
-                                   ├─ Rama SEÑALES → PARE / SIGA / nada (+ distancia por posición en y)
-                                   ├─ Máquina de estados
-                                   ├─ Controlador PD → velocidad izquierda / derecha
-                                   └─ Salida (interfaz para el módulo Bluetooth del compañero)
-```
-
-La laptop **no** implementa el protocolo Bluetooth. Solo entrega comandos a través de una interfaz (`comunicacion/salida.py`) que el compañero conecta con su implementación.
-
-## 2. Condiciones observadas en los videos de ensayo
-
-Estas observaciones guían los parámetros por defecto:
-
-- **Video vertical.** La cámara del teléfono va montada sobre el robot y mira hacia adelante y abajo.
-- **El chasis del robot ocupa aproximadamente el 35–40 % inferior del cuadro.** Se ven el chasis cian, el sensor ultrasónico y baterías verdes y naranjas. **Esa zona se descarta siempre**, porque las baterías verdes generarían falsos "SIGA".
-- **La línea es gris oscuro o negra**, sobre un piso blanco o gris claro. Hay sombras del robot y del entorno, y la línea se ve en perspectiva (se estrecha a lo lejos).
-- **Las señales están en el piso, sobre la línea.** Hay una franja negra transversal debajo de cada una. Se ven achatadas por la perspectiva.
-- **Las señales definitivas son octágonos rojo y verde** con texto blanco ("PARE" / "SIGA") y borde oscuro.
-- **Hay desenfoque de movimiento** en varios fotogramas.
-
-## 3. Pipeline de visión
-
-### 3.1 Preprocesamiento
-1. Rotación si el stream llega girado (`cv2.rotate`).
-2. Redimensionado a un ancho fijo (≈ 240–320 px) para garantizar el tiempo real.
-3. Filtro gaussiano leve.
-4. **Recorte del chasis:** se descarta todo lo que esté por debajo de la fila `FILA_CHASIS`.
-
-### 3.2 Detección de la línea (franjas horizontales)
-1. La ROI de la línea es la zona justo encima del chasis. Se divide en `N_FRANJAS` franjas horizontales.
-2. Máscara de "oscuridad": escala de grises → umbral inverso → apertura y cierre.
-   - El umbral se **recalibra periódicamente con K-Means (K=2)** sobre una submuestra de píxeles de la ROI. Los dos centroides corresponden a "línea" y "piso", y el umbral es su punto medio.
-3. En cada franja se calcula la **proyección por columnas** (suma de píxeles blancos por columna) y se buscan los tramos continuos.
-   - **Selección voraz:** se elige el tramo más cercano a la posición anterior de la línea.
-   - Se **descartan los tramos demasiado anchos** (franja transversal de las señales o cruces).
-4. Salidas del módulo:
-   - `error`: desplazamiento normalizado de la franja cercana respecto al centro, en [-1, 1].
-   - `angulo`: diferencia entre el centro de la franja lejana y el de la cercana.
-   - `confianza`: número de franjas válidas.
-
-### 3.3 Detección de señales
-1. Conversión a HSV. Máscaras de color:
-   - **Rojo:** dos rangos, porque el matiz da la vuelta (0–10 y 170–179).
-   - **Verde:** H ≈ 55–85. **No se amplía más allá de 85**, para no confundirlo con el cian del chasis (≈ 90–95).
-2. Apertura y cierre. El cierre también tapa los huecos que dejan las letras blancas.
-3. Contornos externos (`RETR_EXTERNAL`). Los filtros se aplican en cascada:
-   - Área mínima.
-   - `approxPolyDP` con **7 a 9 vértices** (tolerancia a la perspectiva y al desenfoque).
-   - **Extensión** = área del contorno / área del `boundingRect`. En un octágono regular vale ≈ 0.83, y **no cambia al achatarse por perspectiva**, a diferencia de la relación de aspecto.
-   - Circularidad 4πA/P² como filtro auxiliar, con rango amplio.
-4. **Confirmación temporal:** una señal solo se acepta si se detecta en `N` de los últimos `M` fotogramas.
-5. **Distancia por posición:** como la señal está en el piso, cuanto más abajo aparece su centroide, más cerca está. El robot actúa cuando el centroide cruza la **línea de disparo** `Y_DISPARO`.
-
-### 3.4 Máquina de estados
-
-| Estado | Comportamiento | Transición |
+| Carpeta | Etiqueta de salida | Acción |
 |---|---|---|
-| `SEGUIR_LINEA` | Control PD sobre la línea | Rojo confirmado bajo `Y_DISPARO` → `PARE`; línea perdida → `LINEA_PERDIDA` |
-| `PARE` | Motores detenidos durante `TIEMPO_PARE` segundos | Fin del tiempo → `REANUDAR` |
-| `REANUDAR` | Sigue la línea **ignorando el rojo** | El rojo sale del cuadro o pasa `TIEMPO_ENFRIAMIENTO` → `SEGUIR_LINEA` |
-| `SIGA` | Registra la señal y continúa | Inmediato → `SEGUIR_LINEA` |
-| `LINEA_PERDIDA` | Gira hacia el lado del último error conocido | Línea recuperada → `SEGUIR_LINEA`; tiempo límite → detenerse |
+| `dataset/0` | `PARE` | Parar 3 segundos; reanudar con el intervalo anterior |
+| `dataset/1` | `SIGA` | Un pulso de avance cada 1 segundo |
+| `dataset/2` | `VELOCIDAD_60` | Un pulso de avance cada 0,5 segundos |
+| `dataset/3` | `ZONA_ESCOLAR` | Un pulso de avance cada 2 segundos |
 
-### 3.5 Control
-- Control **PD**: `giro = KP·error + KD·Δerror + KA·angulo`, con el error suavizado mediante una media exponencial.
-- La velocidad base se reduce cuando |error| o |ángulo| son grandes (curvas).
-- Salida diferencial: `izq = v + giro`, `der = v − giro`, recortadas a `[-VEL_MAX, VEL_MAX]`.
+Los intervalos controlan la frecuencia de `Robot.adelante()`. El firmware recibe pulsos discretos; la etiqueta de 60 km/h no implica esa velocidad física. Los giros mantienen su propia frecuencia de corrección. El último intervalo persiste si no hay señal; el inicial es 1 segundo.
 
-## 4. Contrato con el módulo de comunicación
+## Instalación y datos
 
-La laptop entrega comandos mediante esta interfaz (`comunicacion/salida.py`):
+Python 3.12. Desde esta carpeta puede reutilizarse el entorno del proyecto padre:
+
+```powershell
+..\.venv\Scripts\python.exe -m pip install -r requirements.txt
+..\.venv\Scripts\python.exe -m entrenamiento.preparar --origen ..\dataset
+```
+
+En una máquina nueva, crear un entorno e instalar los requisitos antes de ejecutar los mismos módulos con su Python.
+
+`entrenamiento.preparar` lee solo las carpetas `0–3`, corrige EXIF, convierte HEIC, copia JPEG a `dataset/` y genera recortes en `datos_preparados/`. Conserva las fotos de origen. El detector propone regiones rojas, verdes y amarillas, con filtros de área/aspecto/extensión; la CNN determina la clase. Se usa el mismo localizador en fotografías y video. Una foto sin propuesta válida se registra y excluye; no se sustituye silenciosamente por el fondo completo.
+
+Artefactos de preparación:
+
+- `manifiesto.json`: procedencia, hashes, conversiones, duplicados y rectángulos.
+- `rechazados.json`: errores y fotos sin recorte válido.
+- `particiones.csv`: división estratificada persistente 70/20/10, semilla 42.
+- `resumen.json`: conteos y etiquetas.
+
+Los duplicados exactos por archivo o píxeles no se repiten entre particiones. La división sucede antes de cualquier eventual aumento de datos. Esta versión no usa aumento: entrena la cabeza sobre características congeladas. La lista del manifiesto es la fuente de verdad; archivos antiguos no referenciados no participan en el entrenamiento.
+
+## Entrenar las cinco CNN
+
+```powershell
+..\.venv\Scripts\python.exe -m entrenamiento.main
+# Continuar una corrida interrumpida sin repetir modelos completados:
+..\.venv\Scripts\python.exe -m entrenamiento.main --reanudar
+# Ejemplo de corrida distinta:
+..\.venv\Scripts\python.exe -m entrenamiento.main --modelos MobileNet --experimento prueba_mobile --epocas 10
+```
+
+Se entrenan VGG16, VGG19, MobileNet, ResNet50 y DenseNet121, secuencialmente. Configuración inicial: entrada 224×224 RGB, lote 32, Adam `1e-3`, Dropout 0,3, máximo 10 épocas y paciencia 5 por `val_loss`, restaurando los mejores pesos. ImageNet se descarga solo si no está en la caché de Keras.
+
+La base ImageNet está congelada. Sus características con global average pooling se calculan una vez y se guardan en disco; la cabeza Dropout + Dense aprende sobre ellas. Es equivalente a repetir esa misma base congelada en cada época y reduce el costo de CPU. No se cachean todas las fotos originales en RAM. Para cambiar la arquitectura, el preprocesamiento o el tamaño, usar un experimento nuevo y regenerar las características.
+
+`resultados/senales_1/` contiene la configuración, copia de las particiones, comparación CSV, curvas, selección por F1 macro de **validación**, y una carpeta por modelo con:
+
+- `<modelo>.keras` y `metadatos.json`: modelo completo con pesos y contrato de etiquetas/preprocesamiento.
+- Historial, métricas, reporte por clase, matriz de confusión y curvas de pérdida.
+- `predicciones_test.csv`: las probabilidades de cada foto de prueba.
+- Latencia mediana y p95 sobre diez inferencias completas, después de calentamiento; excluye lectura y resize y no representa los FPS completos del robot.
+
+TensorFlow instalado en Windows usa CPU. Los resultados provienen de fotos similares de una misma pista/sesión; deben verificarse con nuevos videos y otras condiciones de iluminación antes de atribuirles capacidad de generalización.
+
+## Evaluar y predecir sin entrenar
+
+```powershell
+..\.venv\Scripts\python.exe -m entrenamiento.evaluar
+..\.venv\Scripts\python.exe -m entrenamiento.evaluar --modelo resultados/senales_1/ResNet50/ResNet50.keras
+..\.venv\Scripts\python.exe predecir.py "..\dataset\0\20261027_095759.jpg"
+..\.venv\Scripts\python.exe predecir.py "foto.jpg" --modelo resultados/senales_1/ResNet50/ResNet50.keras
+..\.venv\Scripts\python.exe predecir.py "recorte.jpg" --recorte
+```
+
+La evaluación recarga el archivo exportado y escribe `evaluacion_recargada.json`; incluye la fracción de fotos con confianza ≥0,80. El CLI de predicción devuelve una lista de candidatos con sus probabilidades; una lista vacía significa que no encontró una región de señal. No aplica confirmación temporal a una foto aislada.
+
+Uso de la clase Python:
 
 ```python
-class SalidaRobot:
-    def enviar(self, izquierda: int, derecha: int, estado: str) -> None: ...
-    def detener(self) -> None: ...
-    def cerrar(self) -> None: ...
+from vision.clasificador_senales import ClasificadorSenales
+
+predictor = ClasificadorSenales("resultados/senales_1/MobileNet/MobileNet.keras")
+resultado = predictor.predecir("recorte.jpg")
+# O un recorte de OpenCV:
+# resultado = predictor.predecir(recorte_bgr, orden_color="BGR")
+print(resultado["identificador"], resultado["nombre"], resultado["confianza"])
 ```
 
-- `izquierda` y `derecha` son enteros en `[-VEL_MAX, VEL_MAX]`; el signo indica el sentido de giro de cada rueda.
-- `enviar` se llama a una frecuencia fija (`FRECUENCIA_ENVIO`, por defecto 15 Hz).
-- Hay dos implementaciones incluidas: `SalidaConsola` (imprime los comandos) y `SalidaNula` (no hace nada). El compañero agrega `SalidaBluetooth` con el mismo método.
-- Se recomienda que el Arduino tenga un *watchdog*: si no recibe comandos en ~400 ms, detiene los motores.
-- `SalidaMBot` (en `comunicacion/salida_mbot.py`) envuelve la clase `Robot` que entrega el docente para el firmware Bluetooth del mBot (repositorio [`practica-vision-artificial-robotica`](https://github.com/stfrancoc/practica-vision-artificial-robotica), carpeta `master_pc/Robot.py`). Ese código no es un fork ni se reorganizó este repositorio hacia su estructura: es solo la referencia del firmware/protocolo Bluetooth, usada como implementación de `SalidaRobot`.
-  - `comunicacion/robot_mbot.py` es una **copia sin modificar** de `Robot.py`, tomada el 2026-09-28. Se copió (en vez de importarse desde el repositorio clonado del docente) porque ese repositorio se clona solo como referencia local y no está versionado en este proyecto (ver `.gitignore`).
+La clase clasifica una imagen de señal ya recortada y carga los pesos una sola vez. Para fotografías completas, usar primero `vision.propuestas_senales.proponer_senales`, como hace el CLI. Matrices RGB/BGR deben tener tres canales y valores en [0,255]. Mantener `metadatos.json` junto al `.keras`; inferencia no necesita dataset, Internet ni pesos ImageNet externos. El softmax siempre elige entre cuatro clases; la confianza por sí sola no garantiza rechazar objetos desconocidos.
 
-## 4.1 Modelo real de comandos del mBot (según `Robot.py` y `arduinoFinal.ino`)
+## Ejecutar el robot
 
-El robot del docente **no acepta velocidades ni magnitudes**: son 5 comandos discretos sin parámetros (`adelante`, `atras`, `izquierda`, `derecha`, `parar`), y cada uno es un **pulso de duración fija que se autodetiene** en el firmware (100 ms para avance/retroceso, 30 ms para los giros) — no hay control de velocidad desde Python. Además, `izquierda()`/`derecha()` mueven **ambos motores en el mismo sentido**: son giros de radio amplio, no giros sobre el propio eje. `control/controlador.py` y `control/estados.py` están adaptados a este modelo (control por zonas de error en vez de una magnitud continua de corrección); ver los comentarios `CALIBRAR CON ROBOT` en `config.py` para los parámetros que solo se pueden fijar con el robot físico conectado.
-
-## 5. Estructura del proyecto
-
-```
-reto-seguidor-linea/
-├── README.md
-├── CLAUDE.md                 # reglas para Claude Code
-├── requirements.txt
-├── config.py                 # TODOS los parámetros ajustables
-├── main.py                   # punto de entrada
-├── calibrar.py               # herramienta de calibración con trackbars
-├── vision/
-│   ├── captura.py            # fuente de video (archivo / URL / cámara) con hilo
-│   ├── preprocesamiento.py
-│   ├── umbral_kmeans.py
-│   ├── linea.py
-│   └── senales.py
-├── control/
-│   ├── controlador.py        # PD
-│   └── estados.py            # máquina de estados
-├── comunicacion/
-│   └── salida.py             # interfaz + SalidaConsola + SalidaNula
-├── utils/
-│   ├── visualizacion.py      # mosaico de depuración
-│   └── metricas.py           # FPS, latencia, registro de eventos
-├── videos/                   # videos de ensayo (no se suben al repositorio)
-└── capturas/                 # imágenes exportadas para el póster
+```powershell
+# Solo percepción, sin mover el robot:
+..\.venv\Scripts\python.exe main.py --camara 0 --debug
+# Mostrar decisiones, sin enviar:
+..\.venv\Scripts\python.exe main.py --video videos/ensayo.mp4 --etapa comandos --salida nula --debug
+# Registrar pulsos, sin Bluetooth:
+..\.venv\Scripts\python.exe main.py --url http://192.168.1.50:8080/video --etapa completo --salida registro --debug
+# Robot físico: presionar 'i' en la ventana para iniciar:
+..\.venv\Scripts\python.exe main.py --url http://192.168.1.50:8080/video --etapa completo --salida mbot --debug
 ```
 
-## 6. Instalación
+`--modelo` permite seleccionar cualquiera de las cinco CNN. MobileNet es la predeterminada para el robot. `--detector clasico` conserva el detector PARE/SIGA del reto anterior para comparación y calibración.
 
-```bash
-python -m venv .venv
-# Windows
-.venv\Scripts\activate
-# Linux / macOS
-source .venv/bin/activate
+La CNN corre en un trabajador con una sola casilla: un fotograma nuevo reemplaza al pendiente; nunca se acumula una cola. La confirmación exige confianza ≥0,80 y presencia en 3 de las últimas 5 **inferencias nuevas**, además de cruzar `Y_DISPARO`. Un resultado caduca al superar un segundo desde la entrega del fotograma al trabajador. Volver a consultar el mismo resultado no cuenta como otra inferencia. PARE solo se rearma después de cinco inferencias consecutivas sin PARE visible. La parada tiene prioridad sobre los pulsos y descarta movimientos pendientes.
 
-pip install -r requirements.txt
+`--salida registro` escribe `resultados/comandos.csv`, incluyendo señal, confianza, estado e intervalo. La telemetría del ciclo se escribe en `resultados/telemetria/`. Los modos `vision` y `comandos` no abren Bluetooth ni envían comandos. La falta de un modelo válido produce un error; no cambia automáticamente al detector clásico.
+
+Calibrar con el robot: `ROTACION`, `FILA_CHASIS`, `ROI_SENALES_*`, `Y_DISPARO`, rangos `CNN_RANGOS_HSV`, confianza, caducidad y `INTERVALOS_AVANCE`. Los valores de orientación/ROI se heredaron del robot original. La zona recortada debe permitir ver una señal completa antes de que salga de la ROI; la configuración depende del montaje de la cámara. Los giros del firmware también desplazan el robot y afectan la velocidad efectiva.
+
+## Pruebas y entrega
+
+```powershell
+..\.venv\Scripts\python.exe -m unittest discover -s pruebas -v
+# Fotos reales de validación, reloj y línea simulados, sin Bluetooth:
+..\.venv\Scripts\python.exe -m pruebas.demostracion_cnn
+# Flujo main.py con 400 fotogramas compuestos y reloj real (~20 segundos):
+..\.venv\Scripts\python.exe -m pruebas.probar_pipeline_cnn
 ```
 
-Dependencias: `opencv-python`, `numpy` y `scikit-learn` (K-Means, igual que en el cuaderno de clase).
+Incluye las pruebas originales y pruebas de intervalos, prioridad de parada, PARE de tres segundos, rearme, confirmación, ausencia/baja confianza, descarte de fotogramas, particiones y exportaciones de los cinco modelos. Las pruebas de pesos reales se omiten si todavía no se entrenaron. No se ha validado con cámara ni robot físico.
 
-## 7. Uso
+Fotos, recortes, cachés y pesos quedan disponibles localmente y excluidos de Git. El código y los informes resumidos de `docs/` permiten revisar el trabajo; para reproducirlo, proporcionar las fotos y ejecutar preparación/entrenamiento. La documentación del reto anterior queda como antecedente en `docs/ROBOT_ORIGINAL.md`.
 
-```bash
-# Con un video de ensayo (modo desarrollo)
-python main.py --video videos/ensayo1.mp4 --debug
+Para completar el fork remoto cuando la cuenta esté autenticada:
 
-# Con el stream del teléfono (p. ej. app IP Webcam)
-python main.py --url http://192.168.1.50:8080/video --debug
-
-# Con una cámara local
-python main.py --camara 0
-
-# Herramienta de calibración
-python calibrar.py --video videos/ensayo1.mp4
+```powershell
+gh auth login --hostname github.com --web
+gh auth switch --user miguelfsociety
+gh repo fork stfrancoc/visionRobot1 --clone=false
+git remote add origin https://github.com/miguelfsociety/visionRobot1.git
+git push -u origin feature/cnn-senales
 ```
 
-Teclas en modo `--debug`:
-
-| Tecla | Acción |
-|---|---|
-| `q` / `Esc` | Salir |
-| `Espacio` | Pausar / reanudar |
-| `d` | Avanzar un fotograma (en pausa) |
-| `s` | Guardar el mosaico actual en `capturas/` |
-
-## 8. Técnicas permitidas (según el enunciado)
-
-Operaciones lógicas y aritméticas · espacios de color RGB/HSV/CIELab · ROI · redimensionado y rotación · umbralización · segmentación por color · K-Means básico · erosión, dilatación, apertura y cierre · suavizado · Canny · contornos · formas geométricas simples · área, perímetro, centroide (momentos), aproximación poligonal y relación de aspecto.
-
-**No se usan:** Hough, cascadas Haar, el módulo `cv2.dnn`, modelos entrenados ni ninguna función que detecte automáticamente la línea o las señales.
-
-## 9. Relación con Análisis y Diseño de Algoritmos
-
-- **Complejidad por fotograma:** cada etapa es O(W·H) y K-Means es O(n·k·i). Esto justifica el redimensionado, la ROI y ejecutar K-Means solo cada `PERIODO_KMEANS` fotogramas y sobre una submuestra.
-- **Estrategia voraz:** en cada franja se elige el tramo más cercano a la posición anterior de la línea.
-- **Máquina de estados finitos:** formaliza las decisiones del robot.
-
-## 10. Criterios de la competencia que atiende cada módulo
-
-| Criterio | Módulo |
-|---|---|
-| Tiempo total | Control PD con anticipación y velocidad adaptativa |
-| Cumplimiento de PARE | `senales.py` + línea de disparo + estado `PARE` |
-| Cumplimiento de SIGA | `senales.py` + estado `SIGA` |
-| Descarrilamientos | Franjas + descarte de tramos anchos + selección voraz |
-| Recuperación de la trayectoria | Estado `LINEA_PERDIDA` con memoria del último error |
+La copia local conserva `upstream` apuntando al repositorio original. El fork remoto y su publicación requieren credenciales válidas de `miguelfsociety`.

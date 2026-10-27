@@ -66,6 +66,10 @@ class MaquinaEstados:
         self.signo_ultimo_error = 1
         self.tiempo_entrada_estado = 0.0
         self.eventos = []
+        self.intervalo_avance = config.INTERVALO_AVANCE_INICIAL
+        self.pare_armado = True
+        self._ausencias_pare = 0
+        self._ultima_inferencia = -1
 
     def actualizar(
         self,
@@ -85,6 +89,23 @@ class MaquinaEstados:
         if resultado_linea.valida and resultado_linea.error != 0:
             self.signo_ultimo_error = 1 if resultado_linea.error > 0 else -1
 
+        nueva = resultado_senales.actualizacion
+        if nueva is None or (nueva >= 0 and nueva != self._ultima_inferencia):
+            self._ultima_inferencia = nueva
+            visible = resultado_senales.pare_visible
+            if visible is None:
+                visible = resultado_senales.senal == "PARE"
+            self._ausencias_pare = 0 if visible else self._ausencias_pare + 1
+            if self._ausencias_pare >= config.CNN_REARMAR_PARE:
+                self.pare_armado = True
+        if resultado_senales.en_disparo:
+            if resultado_senales.senal in config.INTERVALOS_AVANCE:
+                self.intervalo_avance = config.INTERVALOS_AVANCE[resultado_senales.senal]
+            if (resultado_senales.senal == "PARE" and self.pare_armado
+                    and self.estado not in {PARE, DETENIDO}):
+                self.pare_armado = False
+                self._cambiar_estado(PARE, tiempo_actual, "PARE confirmado en disparo")
+
         manejador = {
             SEGUIR_LINEA: self._en_seguir_linea,
             PARE: self._en_pare,
@@ -97,7 +118,9 @@ class MaquinaEstados:
         izquierda, derecha = manejador(resultado_linea, resultado_senales, tiempo_actual)
 
         accion = calcular_accion(izquierda, derecha, config.DIF_GIRO)
-        return ComandoRobot(izquierda=izquierda, derecha=derecha, estado=self.estado, accion=accion)
+        return ComandoRobot(izquierda=izquierda, derecha=derecha, estado=self.estado, accion=accion,
+            intervalo_avance=self.intervalo_avance, senal=resultado_senales.senal,
+            confianza_senal=resultado_senales.confianza)
 
     def obtener_eventos(self) -> list[tuple[float, str, str, str]]:
         """Devuelve el historial de cambios de estado registrados.
@@ -123,11 +146,7 @@ class MaquinaEstados:
         self.tiempo_entrada_estado = tiempo_actual
 
     def _en_seguir_linea(self, resultado_linea, resultado_senales, tiempo_actual):
-        if resultado_senales.senal == "PARE" and resultado_senales.en_disparo:
-            self._cambiar_estado(PARE, tiempo_actual, "PARE confirmado en disparo")
-            return self.controlador.detener()
-
-        if resultado_senales.senal == "SIGA" and resultado_senales.en_disparo:
+        if resultado_senales.senal == "SIGA" and resultado_senales.en_disparo and resultado_linea.valida:
             self._cambiar_estado(SIGA, tiempo_actual, "SIGA confirmado en disparo")
             return self.controlador.calcular(resultado_linea)
 
@@ -141,6 +160,9 @@ class MaquinaEstados:
         if tiempo_actual - self.tiempo_entrada_estado >= config.TIEMPO_PARE:
             self.controlador.reiniciar()
             self._cambiar_estado(REANUDAR, tiempo_actual, "tiempo de PARE cumplido")
+            if not resultado_linea.valida:
+                self._cambiar_estado(LINEA_PERDIDA, tiempo_actual, "línea inválida al salir de PARE")
+                return self.controlador.girar_busqueda(self.signo_ultimo_error)
             return self.controlador.calcular(resultado_linea)
 
         return self.controlador.detener()
@@ -161,6 +183,9 @@ class MaquinaEstados:
 
     def _en_siga(self, resultado_linea, resultado_senales, tiempo_actual):
         self._cambiar_estado(SEGUIR_LINEA, tiempo_actual, "evento SIGA registrado")
+        if not resultado_linea.valida:
+            self._cambiar_estado(LINEA_PERDIDA, tiempo_actual, "línea inválida tras SIGA")
+            return self.controlador.girar_busqueda(self.signo_ultimo_error)
         return self.controlador.calcular(resultado_linea)
 
     def _en_linea_perdida(self, resultado_linea, resultado_senales, tiempo_actual):

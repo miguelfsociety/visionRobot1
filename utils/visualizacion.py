@@ -103,7 +103,8 @@ def _dibujar_texto_estado(lienzo, comando, resultado_linea, resultado_senales, f
     lineas_texto = [
         f"estado={comando.estado} accion={comando.accion}",
         f"error={resultado_linea.error:+.2f} angulo={resultado_linea.angulo:+.2f} confianza={resultado_linea.confianza}",
-        f"senal={resultado_senales.senal} en_disparo={resultado_senales.en_disparo}",
+        f"senal={resultado_senales.senal} p={resultado_senales.confianza:.2f} disparo={resultado_senales.en_disparo}",
+        f"intervalo_avance={comando.intervalo_avance:.1f}s",
         f"FPS={fps:.1f} latencia_total={latencia_total_s * 1000:.1f}ms",
     ]
     for indice, texto in enumerate(lineas_texto):

@@ -20,3 +20,9 @@ practica-vision-artificial-robotica-main/
 
 # Videos de ensayo: pesan demasiado para el repositorio (ver README.md).
 videos/
+dataset/
+datos_preparados/
+resultados/
+*.keras
+*.h5
+*.tflite

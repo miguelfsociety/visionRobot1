@@ -9,6 +9,7 @@ físico: SalidaConsola, SalidaNula y SalidaRegistro.
 
 import csv
 import time
+from pathlib import Path
 
 import config
 from control.contratos import ComandoRobot
@@ -85,20 +86,22 @@ class SalidaRegistro(SalidaRobot):
     después el comportamiento del control (métricas para el póster).
     """
 
-    _ENCABEZADO = ["tiempo", "estado", "accion", "izquierda", "derecha"]
+    _ENCABEZADO = ["tiempo", "estado", "accion", "izquierda", "derecha", "senal", "confianza", "intervalo_avance"]
 
     def __init__(self, ruta_csv: str):
+        Path(ruta_csv).parent.mkdir(parents=True, exist_ok=True)
         self._archivo = open(ruta_csv, "w", newline="", encoding="utf-8")
         self._escritor = csv.writer(self._archivo)
         self._escritor.writerow(self._ENCABEZADO)
 
     def enviar(self, comando: ComandoRobot) -> None:
         self._escritor.writerow(
-            [time.monotonic(), comando.estado, comando.accion, comando.izquierda, comando.derecha]
+            [time.monotonic(), comando.estado, comando.accion, comando.izquierda, comando.derecha,
+             comando.senal, comando.confianza_senal, comando.intervalo_avance]
         )
 
     def detener(self) -> None:
-        self._escritor.writerow([time.monotonic(), "DETENER", "DETENER", 0, 0])
+        self._escritor.writerow([time.monotonic(), "DETENER", "DETENER", 0, 0, "", "", ""])
 
     def cerrar(self) -> None:
         self._archivo.close()

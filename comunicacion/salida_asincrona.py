@@ -44,6 +44,10 @@ class SalidaAsincrona(SalidaRobot):
         self._salida_real = salida_real
         self._comando_pendiente = None
         self._candado = threading.Lock()
+        self._candado_envio = threading.Lock()
+        self._generacion = 0
+        self._deteniendo = False
+        self._error = None
         self._hay_comando = threading.Event()
         self._detener = False
         self._hilo = threading.Thread(target=self._despachar, daemon=True)
@@ -61,11 +65,21 @@ class SalidaAsincrona(SalidaRobot):
 
             with self._candado:
                 comando = self._comando_pendiente
+                generacion = self._generacion
                 self._comando_pendiente = None
                 self._hay_comando.clear()
 
             if comando is not None:
-                self._salida_real.enviar(comando)
+                try:
+                    with self._candado_envio:
+                        with self._candado:
+                            vigente = generacion == self._generacion and not self._detener
+                        if vigente:
+                            self._salida_real.enviar(comando)
+                except Exception as error:
+                    self._error = error
+                    self._detener = True
+                    return
 
     def enviar(self, comando: ComandoRobot) -> None:
         """Deja el comando para que el hilo despachador lo envíe.
@@ -76,7 +90,14 @@ class SalidaAsincrona(SalidaRobot):
 
         Recibe: comando (ComandoRobot). Devuelve: nada.
         """
+        if self._error:
+            raise RuntimeError("Falló el envío al robot") from self._error
+        if comando.accion == "DETENER":
+            self.detener()
+            return
         with self._candado:
+            if self._detener or self._deteniendo:
+                return
             self._comando_pendiente = comando
         self._hay_comando.set()
 
@@ -93,16 +114,29 @@ class SalidaAsincrona(SalidaRobot):
         Recibe: nada. Devuelve: nada.
         """
         with self._candado:
+            self._generacion += 1
+            self._deteniendo = True
             self._comando_pendiente = None
             self._hay_comando.clear()
-        self._salida_real.detener()
+        try:
+            # Serializa el pulso que ya estaba en curso antes de parar.
+            # Ningún movimiento extraído antes de detener() puede salir después.
+            with self._candado_envio:
+                self._salida_real.detener()
+        finally:
+            with self._candado:
+                self._deteniendo = False
 
     def cerrar(self) -> None:
         """Detiene el hilo despachador y cierra la salida real.
 
         Recibe: nada. Devuelve: nada.
         """
-        self._detener = True
+        with self._candado:
+            self._detener = True
+            self._generacion += 1
+            self._comando_pendiente = None
         self._hay_comando.set()
         self._hilo.join(timeout=1.0)
-        self._salida_real.cerrar()
+        with self._candado_envio:
+            self._salida_real.cerrar()

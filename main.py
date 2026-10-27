@@ -35,12 +35,14 @@ de integración: las funciones de vision/ siguen siendo puras.
 """
 
 import argparse
+from contextlib import ExitStack
 import time
 
 import cv2
 
 import config
-from comunicacion.salida import SalidaConsola, SalidaNula
+from comunicacion.salida import SalidaConsola, SalidaNula, SalidaRegistro
+from control.pulsos import ProgramadorPulsos
 from control.contratos import ComandoRobot, ResultadoLinea
 from control.estados import MaquinaEstados
 from utils.metricas import Cronometro, MetricasCiclo
@@ -183,6 +185,8 @@ def _crear_salida(nombre_salida: str):
         return SalidaConsola()
     if nombre_salida == "nula":
         return SalidaNula()
+    if nombre_salida == "registro":
+        return SalidaRegistro("resultados/comandos.csv")
     if nombre_salida == "mbot":
         # Import diferido: comunicacion.salida_mbot solo se necesita
         # (y solo debería fallar si falta pybluez/el robot) cuando de
@@ -201,6 +205,12 @@ def _crear_salida(nombre_salida: str):
 
 
 def ejecutar(argumentos) -> None:
+    """Ejecuta y libera recursos incluso si falla la inicialización."""
+    with ExitStack() as recursos:
+        _ejecutar_con_recursos(argumentos, recursos)
+
+
+def _ejecutar_con_recursos(argumentos, recursos) -> None:
     """Corre el ciclo principal del robot hasta que la fuente termine o
     el usuario salga.
 
@@ -208,23 +218,27 @@ def ejecutar(argumentos) -> None:
     Devuelve: nada.
     Complejidad: O(n) sobre la cantidad de fotogramas procesados.
     """
+    if argumentos.salida == "mbot" and argumentos.etapa == "completo" and not argumentos.debug:
+        raise ValueError("Usa --debug para habilitar el robot con la tecla 'i'.")
+    trabajador = None
+    if argumentos.detector == "cnn":
+        from vision.clasificador_senales import ClasificadorSenales
+        from vision.senales_cnn import DetectorSenalesCNN, TrabajadorSenales
+        clasificador = ClasificadorSenales(argumentos.modelo)
+        trabajador = TrabajadorSenales(DetectorSenalesCNN(clasificador))
+        recursos.callback(trabajador.cerrar)
     fuente = _crear_fuente_video(argumentos)
-    salida = _crear_salida(argumentos.salida)
-    metricas = MetricasCiclo()
+    recursos.callback(fuente.liberar)
+    salida = _crear_salida(argumentos.salida if argumentos.etapa == "completo" else "nula")
+    recursos.callback(salida.cerrar)
+    recursos.callback(salida.detener)
+    metricas = MetricasCiclo("resultados/telemetria")
+    recursos.callback(metricas.cerrar)
 
     estado_linea = EstadoLinea()
     confirmador_senales = ConfirmadorSenales()
     maquina = MaquinaEstados()
-
-    # SalidaMBot bloquea ~100ms por llamada (ver
-    # comunicacion/salida_mbot.py): FRECUENCIA_ENVIO limita cuántas
-    # veces por segundo se llama a salida.enviar(), para que ese
-    # bloqueo no determine la velocidad del ciclo de visión completo
-    # (que puede seguir corriendo mucho más rápido). Con --salida
-    # consola/nula el bloqueo no existe, pero se respeta la misma
-    # frecuencia para medir en condiciones parecidas a las reales.
-    periodo_minimo_envio = 1.0 / config.FRECUENCIA_ENVIO
-    tiempo_ultimo_envio = 0.0
+    programador = ProgramadorPulsos()
 
     if argumentos.debug:
         cv2.namedWindow(NOMBRE_VENTANA)
@@ -247,7 +261,7 @@ def ejecutar(argumentos) -> None:
     ultimo_mosaico = None
 
     def _procesar_fotograma(fotograma, cronometro):
-        nonlocal tiempo_ultimo_envio, eventos_registrados, ultimo_mosaico
+        nonlocal eventos_registrados, ultimo_mosaico
 
         with cronometro.medir("preprocesamiento"):
             preprocesado = preprocesar(fotograma, config)
@@ -257,7 +271,11 @@ def ejecutar(argumentos) -> None:
             resultado_linea, mascara_linea_img = detectar_linea(roi_linea, estado_linea, config)
 
         with cronometro.medir("senales"):
-            resultado_senales = detectar_senales(roi_senales, fila_inicio_senales, confirmador_senales, config)
+            if trabajador is None:
+                resultado_senales = detectar_senales(roi_senales, fila_inicio_senales, confirmador_senales, config)
+            else:
+                trabajador.enviar(roi_senales, fila_inicio_senales)
+                resultado_senales = trabajador.obtener()
 
         resultado_linea = corregir_linea_tapada_por_senal(
             resultado_linea, mascara_linea_img, resultado_senales, fila_inicio_linea, config
@@ -284,13 +302,14 @@ def ejecutar(argumentos) -> None:
                 # que el robot se mueva.
                 print(
                     f"[main] (sin enviar) estado={comando.estado} accion={comando.accion} "
-                    f"izq={comando.izquierda} der={comando.derecha} error={resultado_linea.error:+.2f}"
+                    f"izq={comando.izquierda} der={comando.derecha} error={resultado_linea.error:+.2f} "
+                    f"senal={comando.senal} confianza={comando.confianza_senal:.3f} intervalo={comando.intervalo_avance}s"
                 )
             else:  # "completo"
                 ahora = time.monotonic()
-                if envio_habilitado and ahora - tiempo_ultimo_envio >= periodo_minimo_envio:
+                if envio_habilitado and programador.permitir(comando, ahora, comando.intervalo_avance):
+                    # SalidaAsincrona despacha DETENER con prioridad y borra pendientes.
                     salida.enviar(comando)
-                    tiempo_ultimo_envio = ahora
 
         metricas.registrar_fotograma(cronometro)
 
@@ -371,10 +390,6 @@ def ejecutar(argumentos) -> None:
                     if tecla_pausa == ord("n"):
                         _leer_y_procesar(fuente.avanzar_un_fotograma)
     finally:
-        salida.detener()
-        salida.cerrar()
-        fuente.liberar()
-        metricas.cerrar()
         if argumentos.debug:
             cv2.destroyAllWindows()
 
@@ -391,7 +406,7 @@ def construir_parser() -> argparse.ArgumentParser:
     origen.add_argument("--camara", type=int, help="Índice de cámara local (0, 1, ...)")
     parser.add_argument("--debug", action="store_true", help="Muestra el mosaico de depuración en una ventana")
     parser.add_argument(
-        "--salida", choices=["consola", "nula", "mbot"], default="consola",
+        "--salida", choices=["consola", "nula", "mbot", "registro"], default="consola",
         help="Implementación de SalidaRobot a usar (default: consola)",
     )
     parser.add_argument(
@@ -403,6 +418,11 @@ def construir_parser() -> argparse.ArgumentParser:
             "(con --salida mbot, requiere presionar 'i' para empezar)."
         ),
     )
+    from pathlib import Path
+    parser.add_argument("--detector", choices=["cnn", "clasico"], default="cnn")
+    parser.add_argument("--modelo", type=Path,
+        default=Path(__file__).resolve().parent / "resultados/senales_1/MobileNet/MobileNet.keras",
+        help="Modelo .keras de cuatro señales; sus metadatos deben estar junto al archivo")
     return parser
 
 

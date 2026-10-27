@@ -531,4 +531,30 @@ def _cargar_calibracion():
     _cargar_calibracion_desde(RUTA_CALIBRACION_VISION)
 
 
+###########################################################################
+# Extensión CNN: cuatro señales y control por intervalos de pulsos.
+###########################################################################
+CNN_CONFIANZA_MINIMA = 0.80
+CNN_CONFIRMAR_N = 3
+CNN_CONFIRMAR_M = 5
+CNN_REARMAR_PARE = 5  # Inferencias nuevas consecutivas sin detectar PARE.
+CNN_RESULTADO_MAX_EDAD = 1.0  # Segundos; no actuar sobre detecciones antiguas.
+CNN_ANCHO_PROPUESTAS = 960  # También se usa al preparar las fotos.
+CNN_AREA_MINIMA = 0.001
+CNN_AREA_MAXIMA = 0.65
+CNN_ASPECTO_MINIMO = 0.35
+CNN_ASPECTO_MAXIMO = 2.5
+CNN_EXTENSION_MINIMA = 0.25
+CNN_MARGEN_RECORTE = 0.08
+CNN_MAX_CANDIDATOS = 4
+CNN_KERNEL = 5
+# HSV amplio para incluir el verde azulado de las señales fotografiadas.
+CNN_RANGOS_HSV = {
+    "rojo": (((0, 65, 45), (12, 255, 255)), ((168, 65, 45), (179, 255, 255))),
+    "verde": (((35, 55, 35), (100, 255, 255)),),
+    "amarillo": (((13, 65, 65), (35, 255, 255)),),
+}
+INTERVALOS_AVANCE = {"SIGA": 1.0, "VELOCIDAD_60": 0.5, "ZONA_ESCOLAR": 2.0}
+INTERVALO_AVANCE_INICIAL = 1.0
+
 _cargar_calibracion()

@@ -55,6 +55,9 @@ class ResultadoSenales:
     en_disparo: bool = False
     candidatos: list = field(default_factory=list)
     mascaras: Optional[tuple] = None
+    confianza: float = 0.0
+    actualizacion: Optional[int] = None  # Identificador de inferencia; no contar una dos veces.
+    pare_visible: Optional[bool] = None  # PARE en la inferencia actual, antes de confirmar.
 
 
 @dataclass
@@ -74,6 +77,9 @@ class ComandoRobot:
     derecha: int = 0
     estado: str = "SEGUIR_LINEA"
     accion: str = "DETENER"
+    intervalo_avance: float = 1.0
+    senal: Optional[str] = None
+    confianza_senal: float = 0.0
 
 
 def calcular_accion(izquierda: int, derecha: int, dif_giro: int) -> str:
