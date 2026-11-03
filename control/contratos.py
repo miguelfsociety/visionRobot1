@@ -58,6 +58,8 @@ class ResultadoSenales:
     confianza: float = 0.0
     actualizacion: Optional[int] = None  # Identificador de inferencia; no contar una dos veces.
     pare_visible: Optional[bool] = None  # PARE en la inferencia actual, antes de confirmar.
+    latencia_inferencia_s: float = 0.0
+    edad_s: float = 0.0
 
 
 @dataclass

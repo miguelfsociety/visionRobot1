@@ -37,6 +37,10 @@ def proponer_senales(imagen_bgr, cfg=config):
                 continue
             if area / (w * h) < cfg.CNN_EXTENSION_MINIMA:
                 continue
+            perimetro = cv2.arcLength(contorno, True)
+            poligono = cv2.approxPolyDP(contorno, cfg.CNN_EPSILON_CONTORNO * perimetro, True)
+            if len(poligono) < cfg.CNN_VERTICES_MINIMOS:
+                continue
             x, y, w, h = (round(v / escala) for v in (x, y, w, h))
             margen = round(max(w, h) * cfg.CNN_MARGEN_RECORTE)
             x0, y0 = max(0, x - margen), max(0, y - margen)

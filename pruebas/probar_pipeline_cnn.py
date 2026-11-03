@@ -5,6 +5,7 @@ video a ritmo real (20 segundos) y calibra las ROI solo durante esta prueba.
 """
 
 import csv
+import argparse
 from pathlib import Path
 import time
 from unittest.mock import patch
@@ -17,7 +18,7 @@ from vision.captura import FuenteVideo
 from PIL import Image
 
 
-def probar():
+def probar(modelo=None, perfil="agil"):
     carpeta = Path("resultados/demostracion")
     video = carpeta / "pipeline.avi"
     escritor = cv2.VideoWriter(str(video), cv2.VideoWriter_fourcc(*"MJPG"), 20, (640, 480))
@@ -35,15 +36,19 @@ def probar():
     def leer_pausado(self):
         time.sleep(0.05)
         return leer_original(self)
-    args = main.construir_parser().parse_args(["--video", str(video), "--etapa", "completo", "--salida", "registro"])
+    argumentos = ["--video", str(video), "--etapa", "completo", "--salida", "registro", "--perfil", perfil]
+    if modelo:
+        argumentos += ["--modelo", modelo]
+    args = main.construir_parser().parse_args(argumentos)
     with patch.multiple(main.config, ROTACION=0, FILA_CHASIS=1.0, ROI_SENALES_FIN=1.0), \
             patch.object(FuenteVideo, "leer", leer_pausado):
         main.ejecutar(args)
-    with Path("resultados/telemetria/metricas_fotogramas.csv").open(encoding="utf-8") as archivo:
+    ultima = max((p for p in Path("resultados/telemetria").iterdir() if p.is_dir()), key=lambda p: p.name)
+    with (ultima / "metricas_fotogramas.csv").open(encoding="utf-8") as archivo:
         fotogramas = list(csv.DictReader(archivo))
     if len(fotogramas) != 400:
         raise AssertionError(f"Se esperaban 400 fotogramas; llegaron {len(fotogramas)}")
-    with Path("resultados/comandos.csv").open(encoding="utf-8") as archivo:
+    with (ultima / "comandos.csv").open(encoding="utf-8") as archivo:
         comandos = list(csv.DictReader(archivo))
     observadas = {c["senal"] for c in comandos}
     if not {"SIGA", "VELOCIDAD_60", "ZONA_ESCOLAR", "PARE"}.issubset(observadas):
@@ -52,4 +57,8 @@ def probar():
 
 
 if __name__ == "__main__":
-    probar()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--modelo")
+    parser.add_argument("--perfil", choices=["original", "agil"], default="agil")
+    opciones = parser.parse_args()
+    probar(opciones.modelo, opciones.perfil)

@@ -11,6 +11,10 @@ class ProgramadorPulsos:
         self.ultimo_envio = None
         self.ultima_accion = None
 
+    def avance_disponible(self, ahora, intervalo):
+        """Indica si cumplió el intervalo de avance, sin consumir un pulso."""
+        return self.ultimo_avance is None or ahora - self.ultimo_avance >= intervalo
+
     def permitir(self, comando, ahora, intervalo):
         """Recibe comando y tiempo monótono; devuelve si debe despacharse."""
         detener = comando.accion == "DETENER"
@@ -19,7 +23,7 @@ class ProgramadorPulsos:
         if not prioridad and not listo:
             return False
         if comando.accion == "AVANZAR":
-            if self.ultimo_avance is not None and ahora - self.ultimo_avance < intervalo:
+            if not self.avance_disponible(ahora, intervalo):
                 return False
             self.ultimo_avance = ahora
         if detener:

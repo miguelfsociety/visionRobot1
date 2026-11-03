@@ -28,7 +28,10 @@ class ControladorZonas:
     el error suavizado en zonas y alternando giro/avance según la zona.
     """
 
-    def __init__(self):
+    def __init__(self, sincronizar_envios=False):
+        self.sincronizar_envios = sincronizar_envios
+        self.avance_habilitado = True
+        self._giro_de_espera = False
         self.error_suavizado = 0.0
         self.zona_actual = ZONA_CENTRADO
         # Cuántos comandos lleva emitidos dentro del "plan" de la zona
@@ -61,13 +64,23 @@ class ControladorZonas:
             self._comandos_en_plan = 0
 
         debe_girar = self._decidir_giro()
-        self._comandos_en_plan += 1
+        self._giro_de_espera = (self.sincronizar_envios and not debe_girar
+                               and not self.avance_habilitado and self.zona_actual != ZONA_CENTRADO)
+        if self._giro_de_espera:
+            debe_girar = True  # Corregir mientras llega el siguiente pulso de avance.
+        if not self.sincronizar_envios:
+            self._comandos_en_plan += 1
 
         if not debe_girar:
             return self._senal_avance()
 
         signo = 1 if self.error_suavizado > 0 else -1
         return self._senal_giro(signo)
+
+    def confirmar_envio(self):
+        """Avanza el plan solo al despachar; evita depender de los FPS de cámara."""
+        if self.sincronizar_envios and not self._giro_de_espera:
+            self._comandos_en_plan += 1
 
     def _clasificar_zona(self, error_suavizado: float) -> str:
         """Clasifica el error suavizado en una zona, aplicando histéresis

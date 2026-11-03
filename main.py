@@ -35,7 +35,10 @@ de integración: las funciones de vision/ siguen siendo puras.
 """
 
 import argparse
+import json
 from contextlib import ExitStack
+from datetime import datetime
+from pathlib import Path
 import time
 
 import cv2
@@ -175,18 +178,22 @@ def _crear_fuente_video(argumentos) -> FuenteVideo:
     return FuenteVideo(argumentos.camara)
 
 
-def _crear_salida(nombre_salida: str):
+def _crear_salida(nombre_salida: str, ruta_registro=None):
     """Construye la implementación de SalidaRobot pedida por --salida.
 
     Recibe: nombre_salida (str, "consola", "nula" o "mbot").
     Devuelve: instancia de SalidaRobot. Para "mbot", ya conectada.
     """
     if nombre_salida == "consola":
-        return SalidaConsola()
+        salida = SalidaConsola()
+        if ruta_registro:
+            from comunicacion.salida_con_registro import SalidaConRegistro
+            return SalidaConRegistro(salida, ruta_registro)
+        return salida
     if nombre_salida == "nula":
         return SalidaNula()
     if nombre_salida == "registro":
-        return SalidaRegistro("resultados/comandos.csv")
+        return SalidaRegistro(ruta_registro or "resultados/comandos.csv")
     if nombre_salida == "mbot":
         # Import diferido: comunicacion.salida_mbot solo se necesita
         # (y solo debería fallar si falta pybluez/el robot) cuando de
@@ -195,6 +202,9 @@ def _crear_salida(nombre_salida: str):
         from comunicacion.salida_mbot import SalidaMBot
         salida = SalidaMBot()
         salida.conectar()
+        if ruta_registro:
+            from comunicacion.salida_con_registro import SalidaConRegistro
+            salida = SalidaConRegistro(salida, ruta_registro)
         # Envuelta en SalidaAsincrona porque cada envío por Bluetooth
         # bloquea ~100ms (time.sleep del Robot del docente) y eso
         # arrastraba el ciclo de visión completo de ~59 a ~9 FPS. Solo
@@ -229,16 +239,29 @@ def _ejecutar_con_recursos(argumentos, recursos) -> None:
         recursos.callback(trabajador.cerrar)
     fuente = _crear_fuente_video(argumentos)
     recursos.callback(fuente.liberar)
-    salida = _crear_salida(argumentos.salida if argumentos.etapa == "completo" else "nula")
+    directorio_salida = Path("resultados/telemetria") / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    directorio_salida.mkdir(parents=True, exist_ok=False)
+    if argumentos.etapa == "completo":
+        salida = _crear_salida(argumentos.salida, directorio_salida / "comandos.csv")
+    else:
+        salida = _crear_salida("nula")
     recursos.callback(salida.cerrar)
     recursos.callback(salida.detener)
-    metricas = MetricasCiclo("resultados/telemetria")
+    metricas = MetricasCiclo(str(directorio_salida))
     recursos.callback(metricas.cerrar)
 
     estado_linea = EstadoLinea()
     confirmador_senales = ConfirmadorSenales()
-    maquina = MaquinaEstados()
+    maquina = MaquinaEstados(perfil=argumentos.perfil, sincronizar_envios=True)
     programador = ProgramadorPulsos()
+    print(f"[main] perfil={maquina.perfil} intervalos={maquina.intervalos}")
+    print(f"[main] registros: {directorio_salida.resolve()}")
+    configuracion_ronda = {"perfil": maquina.perfil, "intervalos": maquina.intervalos,
+        "modelo": str(argumentos.modelo), "etapa": argumentos.etapa, "salida": argumentos.salida,
+        "parametros": {k: getattr(config, k) for k in vars(config)
+            if k.startswith(("CNN_", "ROI_")) or k in {"ROTACION", "FILA_CHASIS", "Y_DISPARO",
+                "FRECUENCIA_ENVIO", "TIEMPO_PARE", "ZONA_CENTRADO", "ZONA_FUERTE"}}}
+    (directorio_salida / "configuracion.json").write_text(json.dumps(configuracion_ronda, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if argumentos.debug:
         cv2.namedWindow(NOMBRE_VENTANA)
@@ -285,11 +308,12 @@ def _ejecutar_con_recursos(argumentos, recursos) -> None:
             # Ni máquina de estados ni salida: solo la detección, para
             # calibrar HSV/umbral sobre la pista real sin que el robot
             # pueda moverse.
-            comando = ComandoRobot(estado="(sin control, --etapa vision)")
+            comando = ComandoRobot(estado="(sin control, --etapa vision)", intervalo_avance=maquina.intervalo_avance)
         else:
             tiempo_actual = time.monotonic() - tiempo_inicio
             with cronometro.medir("control"):
-                comando = maquina.actualizar(resultado_linea, resultado_senales, tiempo_actual)
+                comando = maquina.actualizar(resultado_linea, resultado_senales, tiempo_actual,
+                    avance_habilitado=programador.avance_disponible(time.monotonic(), maquina.intervalo_avance))
 
             eventos_nuevos = maquina.obtener_eventos()[eventos_registrados:]
             eventos_registrados += len(eventos_nuevos)
@@ -310,8 +334,9 @@ def _ejecutar_con_recursos(argumentos, recursos) -> None:
                 if envio_habilitado and programador.permitir(comando, ahora, comando.intervalo_avance):
                     # SalidaAsincrona despacha DETENER con prioridad y borra pendientes.
                     salida.enviar(comando)
+                    maquina.confirmar_envio(comando)
 
-        metricas.registrar_fotograma(cronometro)
+        metricas.registrar_fotograma(cronometro, resultado_senales, comando, maquina.perfil)
 
         alto = preprocesado.shape[0]
         fila_chasis_px = round(alto * config.FILA_CHASIS)
@@ -350,8 +375,13 @@ def _ejecutar_con_recursos(argumentos, recursos) -> None:
         Recibe: tecla (int, código de cv2.waitKey).
         Devuelve: nada.
         """
-        nonlocal envio_habilitado
+        nonlocal envio_habilitado, maquina, programador, eventos_registrados
         if tecla == ord("i") and not envio_habilitado:
+            # Las señales vistas mientras se preparaba el robot no deben
+            # consumir el tiempo de PARE antes de iniciar el movimiento.
+            maquina = MaquinaEstados(perfil=argumentos.perfil, sincronizar_envios=True)
+            programador = ProgramadorPulsos()
+            eventos_registrados = 0
             envio_habilitado = True
             print("[main] envío de comandos HABILITADO: el robot empezará a moverse.")
 
@@ -418,8 +448,9 @@ def construir_parser() -> argparse.ArgumentParser:
             "(con --salida mbot, requiere presionar 'i' para empezar)."
         ),
     )
-    from pathlib import Path
     parser.add_argument("--detector", choices=["cnn", "clasico"], default="cnn")
+    parser.add_argument("--perfil", choices=list(config.PERFILES_AVANCE), default=config.PERFIL_AVANCE_PREDETERMINADO,
+        help="Intervalos de avance: agil=0,25/0,125/0,5 s; original=1/0,5/2 s")
     parser.add_argument("--modelo", type=Path,
         default=Path(__file__).resolve().parent / "resultados/senales_1/MobileNet/MobileNet.keras",
         help="Modelo .keras de cuatro señales; sus metadatos deben estar junto al archivo")

@@ -6,6 +6,7 @@ from pathlib import Path
 import keras
 from keras import applications
 import numpy as np
+import tensorflow as tf
 
 from vision.catalogo import CLASES
 from vision.imagenes_cnn import preparar_lote
@@ -41,6 +42,14 @@ class ClasificadorSenales:
             raise ValueError("El tamaño/preprocesamiento del modelo no coincide con sus metadatos")
         self.tamano = forma[1:3]
         self.preprocesar = PREPROCESADORES[arquitectura]
+        # Trazar una vez evita recorrer todas las capas de Keras en Python
+        # en cada candidato. El calentamiento ocurre antes de abrir la cámara.
+        self._inferir = tf.function(
+            lambda lote: self.modelo(lote, training=False),
+            input_signature=[tf.TensorSpec((1, *self.tamano, 3), tf.float32)],
+            autograph=False,
+        )
+        self._inferir(tf.zeros((1, *self.tamano, 3), tf.float32)).numpy()
 
     def predecir(self, imagen, orden_color="RGB"):
         """Recibe ruta o matriz y devuelve clase, nombre, confianza y probabilidades.
@@ -48,7 +57,7 @@ class ClasificadorSenales:
         Complejidad: O(alto × ancho) de lectura más una inferencia de la CNN.
         """
         lote = preparar_lote(imagen, self.tamano, self.preprocesar, orden_color)
-        probabilidades = np.asarray(self.modelo(lote, training=False))[0]
+        probabilidades = np.asarray(self._inferir(lote))[0]
         if (probabilidades.shape != (4,) or not np.isfinite(probabilidades).all()
                 or np.any(probabilidades < 0) or np.any(probabilidades > 1)
                 or not np.isclose(probabilidades.sum(), 1, atol=1e-5)):

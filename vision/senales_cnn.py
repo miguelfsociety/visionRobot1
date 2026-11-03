@@ -5,6 +5,7 @@ ejecuciones de la CNN. No hay una cola creciente de fotogramas.
 """
 
 from collections import deque
+from dataclasses import replace
 import threading
 import time
 
@@ -77,7 +78,9 @@ class TrabajadorSenales:
                         return
                     imagen, offset, capturado = self._pendiente
                     self._pendiente = None
+                inicio = time.monotonic()
                 resultado = self.detector.detectar(imagen, offset)
+                resultado.latencia_inferencia_s = time.monotonic() - inicio
                 with self._condicion:
                     self._resultado = (resultado, capturado)
         except Exception as error:
@@ -90,7 +93,7 @@ class TrabajadorSenales:
             if self._error:
                 raise RuntimeError("Falló el trabajador de señales CNN") from self._error
             if self._resultado and time.monotonic() - self._resultado[1] <= self.cfg.CNN_RESULTADO_MAX_EDAD:
-                return self._resultado[0]
+                return replace(self._resultado[0], edad_s=time.monotonic() - self._resultado[1])
             # No es una inferencia negativa: tampoco rearma PARE.
             return ResultadoSenales(actualizacion=-1)
 

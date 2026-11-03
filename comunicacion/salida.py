@@ -94,9 +94,9 @@ class SalidaRegistro(SalidaRobot):
         self._escritor = csv.writer(self._archivo)
         self._escritor.writerow(self._ENCABEZADO)
 
-    def enviar(self, comando: ComandoRobot) -> None:
+    def enviar(self, comando: ComandoRobot, tiempo=None) -> None:
         self._escritor.writerow(
-            [time.monotonic(), comando.estado, comando.accion, comando.izquierda, comando.derecha,
+            [time.monotonic() if tiempo is None else tiempo, comando.estado, comando.accion, comando.izquierda, comando.derecha,
              comando.senal, comando.confianza_senal, comando.intervalo_avance]
         )
 

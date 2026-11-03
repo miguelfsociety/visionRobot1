@@ -545,6 +545,8 @@ CNN_AREA_MAXIMA = 0.65
 CNN_ASPECTO_MINIMO = 0.35
 CNN_ASPECTO_MAXIMO = 2.5
 CNN_EXTENSION_MINIMA = 0.25
+CNN_VERTICES_MINIMOS = 4  # Descarta triángulos de madera/fondo; admite círculos y pentágonos.
+CNN_EPSILON_CONTORNO = 0.03
 CNN_MARGEN_RECORTE = 0.08
 CNN_MAX_CANDIDATOS = 4
 CNN_KERNEL = 5
@@ -556,5 +558,10 @@ CNN_RANGOS_HSV = {
 }
 INTERVALOS_AVANCE = {"SIGA": 1.0, "VELOCIDAD_60": 0.5, "ZONA_ESCOLAR": 2.0}
 INTERVALO_AVANCE_INICIAL = 1.0
+PERFILES_AVANCE = {
+    "original": {"SIGA": 1.0, "VELOCIDAD_60": 0.5, "ZONA_ESCOLAR": 2.0},
+    "agil": {"SIGA": 0.25, "VELOCIDAD_60": 0.125, "ZONA_ESCOLAR": 0.5},
+}
+PERFIL_AVANCE_PREDETERMINADO = "agil"  # Elegido después de la primera prueba física.
 
 _cargar_calibracion()

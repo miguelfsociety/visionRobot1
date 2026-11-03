@@ -90,6 +90,8 @@ class MetricasCiclo:
         self._escritor_fotogramas = csv.writer(self._archivo_fotogramas)
         self._escritor_fotogramas.writerow(
             ["tiempo", "fps", "latencia_total_s"] + [f"latencia_{etapa}_s" for etapa in ETAPAS]
+            + ["latencia_cnn_s", "edad_cnn_s", "inferencia", "senal", "confianza_senal", "en_disparo",
+               "estado", "accion_calculada", "intervalo_avance", "perfil"]
         )
 
         self._archivo_eventos = open(self._ruta_eventos, "w", newline="", encoding="utf-8")
@@ -99,7 +101,7 @@ class MetricasCiclo:
         self._tiempo_fotograma_anterior = None
         self.fps_actual = 0.0
 
-    def registrar_fotograma(self, cronometro: Cronometro) -> None:
+    def registrar_fotograma(self, cronometro: Cronometro, senales=None, comando=None, perfil="") -> None:
         """Calcula el FPS del fotograma actual (a partir del tiempo
         transcurrido desde el fotograma anterior) y escribe una fila
         en el CSV de fotogramas con FPS y todas las latencias medidas.
@@ -117,6 +119,9 @@ class MetricasCiclo:
 
         fila = [ahora, self.fps_actual, cronometro.latencia_total_s()]
         fila += [cronometro.duraciones[etapa] for etapa in ETAPAS]
+        fila += [senales.latencia_inferencia_s, senales.edad_s, senales.actualizacion,
+                 senales.senal, senales.confianza, senales.en_disparo] if senales else [""] * 6
+        fila += [comando.estado, comando.accion, comando.intervalo_avance, perfil] if comando else [""] * 4
         self._escritor_fotogramas.writerow(fila)
 
     def registrar_evento(self, tipo: str, detalle: str) -> None:

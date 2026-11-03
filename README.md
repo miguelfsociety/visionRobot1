@@ -4,14 +4,14 @@ Extensión de [visionRobot1, rama feature/control-movimiento](https://github.com
 
 ## Señales y comportamiento
 
-| Carpeta | Etiqueta de salida | Acción |
-|---|---|---|
-| `dataset/0` | `PARE` | Parar 3 segundos; reanudar con el intervalo anterior |
-| `dataset/1` | `SIGA` | Un pulso de avance cada 1 segundo |
-| `dataset/2` | `VELOCIDAD_60` | Un pulso de avance cada 0,5 segundos |
-| `dataset/3` | `ZONA_ESCOLAR` | Un pulso de avance cada 2 segundos |
+| Carpeta | Etiqueta de salida | Perfil ágil (predeterminado) | Perfil original |
+|---|---|---|---|
+| `dataset/0` | `PARE` | Parar 3 segundos; conservar intervalo anterior | Igual |
+| `dataset/1` | `SIGA` | Avance cada 0,25 segundos | Cada 1 segundo |
+| `dataset/2` | `VELOCIDAD_60` | Avance cada 0,125 segundos | Cada 0,5 segundos |
+| `dataset/3` | `ZONA_ESCOLAR` | Avance cada 0,5 segundos | Cada 2 segundos |
 
-Los intervalos controlan la frecuencia de `Robot.adelante()`. El firmware recibe pulsos discretos; la etiqueta de 60 km/h no implica esa velocidad física. Los giros mantienen su propia frecuencia de corrección. El último intervalo persiste si no hay señal; el inicial es 1 segundo.
+Los intervalos controlan la frecuencia de `Robot.adelante()`. El firmware recibe pulsos discretos; la etiqueta de 60 km/h no implica esa velocidad física. Los giros mantienen su propia frecuencia de corrección. El último intervalo persiste si no hay señal; el inicial corresponde a SIGA del perfil seleccionado. Usar `--perfil original` para reproducir los intervalos de la primera ronda; `--perfil agil` es el predeterminado del programa. [Revisión de la primera prueba física](docs/PRIMER_TEST.md).
 
 ## Instalación y datos
 
@@ -60,6 +60,15 @@ TensorFlow instalado en Windows usa CPU. Los resultados provienen de fotos simil
 
 ## Evaluar y predecir sin entrenar
 
+Después de la primera ronda se reentrenó ResNet50 con giros de 0/90/180/270 grados e iluminación variable, exclusivamente en entrenamiento. Se preservaron las 107 fotos de validación y 54 de prueba; no se usaron capturas del debug para entrenar:
+
+```powershell
+..\.venv\Scripts\python.exe -m entrenamiento.reentrenar
+..\.venv\Scripts\python.exe -m entrenamiento.evaluar --modelo resultados/senales_iteracion_2/ResNet50/ResNet50.keras
+```
+
+El nuevo modelo se guarda por separado en `resultados/senales_iteracion_2/ResNet50/`; su `seleccion.json` decide entre ambos por validación. El F1 macro de validación subió de 0,9720 a 0,9815; el acierto de prueba se mantuvo en 96,30 %. La inferencia ahora usa un grafo trazado y calentado una vez al cargar, manteniendo el mismo preprocesamiento y probabilidades.
+
 ```powershell
 ..\.venv\Scripts\python.exe -m entrenamiento.evaluar
 ..\.venv\Scripts\python.exe -m entrenamiento.evaluar --modelo resultados/senales_1/ResNet50/ResNet50.keras
@@ -95,13 +104,17 @@ La clase clasifica una imagen de señal ya recortada y carga los pesos una sola 
 ..\.venv\Scripts\python.exe main.py --url http://192.168.1.50:8080/video --etapa completo --salida registro --debug
 # Robot físico: presionar 'i' en la ventana para iniciar:
 ..\.venv\Scripts\python.exe main.py --url http://192.168.1.50:8080/video --etapa completo --salida mbot --debug
+# Segunda ronda, cámara y modelo usados en la revisión:
+..\.venv\Scripts\python.exe main.py --url "http://192.168.137.190:4747/video" --modelo resultados/senales_iteracion_2/ResNet50/ResNet50.keras --perfil agil --etapa completo --salida mbot --debug
 ```
 
 `--modelo` permite seleccionar cualquiera de las cinco CNN. MobileNet es la predeterminada para el robot. `--detector clasico` conserva el detector PARE/SIGA del reto anterior para comparación y calibración.
 
 La CNN corre en un trabajador con una sola casilla: un fotograma nuevo reemplaza al pendiente; nunca se acumula una cola. La confirmación exige confianza ≥0,80 y presencia en 3 de las últimas 5 **inferencias nuevas**, además de cruzar `Y_DISPARO`. Un resultado caduca al superar un segundo desde la entrega del fotograma al trabajador. Volver a consultar el mismo resultado no cuenta como otra inferencia. PARE solo se rearma después de cinco inferencias consecutivas sin PARE visible. La parada tiene prioridad sobre los pulsos y descarta movimientos pendientes.
 
-`--salida registro` escribe `resultados/comandos.csv`, incluyendo señal, confianza, estado e intervalo. La telemetría del ciclo se escribe en `resultados/telemetria/`. Los modos `vision` y `comandos` no abren Bluetooth ni envían comandos. La falta de un modelo válido produce un error; no cambia automáticamente al detector clásico.
+Cada ejecución crea `resultados/telemetria/<fecha_hora>/`, conservando las rondas anteriores. Guarda configuración (sin la MAC), métricas del ciclo, tiempo del trabajador CNN, edad de resultados y decisiones por fotograma. En etapa completa escribe también `comandos.csv`: con Bluetooth se registra debajo de la salida asíncrona, después de un envío exitoso, usando el instante de inicio del envío. Las filas de parada de emergencia/cierre no llevan una señal asociada; se correlacionan por tiempo con la telemetría. Los modos `vision` y `comandos` no abren Bluetooth ni envían comandos. La falta de un modelo válido produce un error; no cambia automáticamente al detector clásico.
+
+La alternancia entre giro/avance del ciclo principal avanza al admitir un pulso para envío, en lugar de avanzar con cada fotograma. Si aún no corresponde avanzar, mantiene las correcciones de giro necesarias. El filtro geométrico de propuestas descarta formas triangulares de fondo, como la madera observada en la grabación.
 
 Calibrar con el robot: `ROTACION`, `FILA_CHASIS`, `ROI_SENALES_*`, `Y_DISPARO`, rangos `CNN_RANGOS_HSV`, confianza, caducidad y `INTERVALOS_AVANCE`. Los valores de orientación/ROI se heredaron del robot original. La zona recortada debe permitir ver una señal completa antes de que salga de la ROI; la configuración depende del montaje de la cámara. Los giros del firmware también desplazan el robot y afectan la velocidad efectiva.
 

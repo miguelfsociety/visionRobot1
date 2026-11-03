@@ -106,6 +106,7 @@ def _dibujar_texto_estado(lienzo, comando, resultado_linea, resultado_senales, f
         f"senal={resultado_senales.senal} p={resultado_senales.confianza:.2f} disparo={resultado_senales.en_disparo}",
         f"intervalo_avance={comando.intervalo_avance:.1f}s",
         f"FPS={fps:.1f} latencia_total={latencia_total_s * 1000:.1f}ms",
+        f"CNN={resultado_senales.latencia_inferencia_s * 1000:.0f}ms edad={resultado_senales.edad_s:.2f}s",
     ]
     for indice, texto in enumerate(lineas_texto):
         y = lienzo.shape[0] - 15 - (len(lineas_texto) - 1 - indice) * 18

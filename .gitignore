@@ -26,3 +26,7 @@ resultados/
 *.keras
 *.h5
 *.tflite
+*.mp4
+*.avi
+*.mkv
+*.mov

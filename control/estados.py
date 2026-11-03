@@ -60,22 +60,28 @@ class MaquinaEstados:
     de cada fotograma.
     """
 
-    def __init__(self):
-        self.controlador = ControladorZonas()
+    def __init__(self, perfil=None, sincronizar_envios=False):
+        self.controlador = ControladorZonas(sincronizar_envios=sincronizar_envios)
         self.estado = SEGUIR_LINEA
         self.signo_ultimo_error = 1
         self.tiempo_entrada_estado = 0.0
         self.eventos = []
-        self.intervalo_avance = config.INTERVALO_AVANCE_INICIAL
+        if perfil is not None and perfil not in config.PERFILES_AVANCE:
+            raise ValueError(f"Perfil de avance desconocido: {perfil}")
+        self.perfil = perfil or "original"
+        self.intervalos = dict(config.PERFILES_AVANCE[perfil] if perfil else config.INTERVALOS_AVANCE)
+        self.intervalo_avance = self.intervalos["SIGA"] if perfil else config.INTERVALO_AVANCE_INICIAL
         self.pare_armado = True
         self._ausencias_pare = 0
         self._ultima_inferencia = -1
+        self._siga_registrado = False
 
     def actualizar(
         self,
         resultado_linea: ResultadoLinea,
         resultado_senales: ResultadoSenales,
         tiempo_actual: float,
+        avance_habilitado: bool = True,
     ) -> ComandoRobot:
         """Avanza la máquina de estados un fotograma y produce el comando.
 
@@ -86,12 +92,15 @@ class MaquinaEstados:
             acción derivada.
         Complejidad: O(1).
         """
+        self.controlador.avance_habilitado = avance_habilitado
         if resultado_linea.valida and resultado_linea.error != 0:
             self.signo_ultimo_error = 1 if resultado_linea.error > 0 else -1
 
         nueva = resultado_senales.actualizacion
         if nueva is None or (nueva >= 0 and nueva != self._ultima_inferencia):
             self._ultima_inferencia = nueva
+            if resultado_senales.senal != "SIGA":
+                self._siga_registrado = False
             visible = resultado_senales.pare_visible
             if visible is None:
                 visible = resultado_senales.senal == "PARE"
@@ -99,8 +108,8 @@ class MaquinaEstados:
             if self._ausencias_pare >= config.CNN_REARMAR_PARE:
                 self.pare_armado = True
         if resultado_senales.en_disparo:
-            if resultado_senales.senal in config.INTERVALOS_AVANCE:
-                self.intervalo_avance = config.INTERVALOS_AVANCE[resultado_senales.senal]
+            if resultado_senales.senal in self.intervalos:
+                self.intervalo_avance = self.intervalos[resultado_senales.senal]
             if (resultado_senales.senal == "PARE" and self.pare_armado
                     and self.estado not in {PARE, DETENIDO}):
                 self.pare_armado = False
@@ -121,6 +130,11 @@ class MaquinaEstados:
         return ComandoRobot(izquierda=izquierda, derecha=derecha, estado=self.estado, accion=accion,
             intervalo_avance=self.intervalo_avance, senal=resultado_senales.senal,
             confianza_senal=resultado_senales.confianza)
+
+    def confirmar_envio(self, comando):
+        """Confirma un pulso admitido por el programador del ciclo principal."""
+        if comando.estado in {SEGUIR_LINEA, SIGA, REANUDAR} and comando.accion != "DETENER":
+            self.controlador.confirmar_envio()
 
     def obtener_eventos(self) -> list[tuple[float, str, str, str]]:
         """Devuelve el historial de cambios de estado registrados.
@@ -146,7 +160,9 @@ class MaquinaEstados:
         self.tiempo_entrada_estado = tiempo_actual
 
     def _en_seguir_linea(self, resultado_linea, resultado_senales, tiempo_actual):
-        if resultado_senales.senal == "SIGA" and resultado_senales.en_disparo and resultado_linea.valida:
+        if (resultado_senales.senal == "SIGA" and resultado_senales.en_disparo
+                and resultado_linea.valida and not self._siga_registrado):
+            self._siga_registrado = True
             self._cambiar_estado(SIGA, tiempo_actual, "SIGA confirmado en disparo")
             return self.controlador.calcular(resultado_linea)
 
